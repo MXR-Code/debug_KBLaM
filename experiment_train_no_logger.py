@@ -586,7 +586,7 @@ if __name__ == "__main__":
     if llm_model_specification is None:
         raise ValueError("Either supply model_dir_to_resume or hf_model_spec")
 
-    hf_token='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'
+    hf_token='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'
     if hf_token is None and args.llm_type == "llama3":  # 如果使用Llama3模型且未提供令牌
         raise ValueError( "Please supply HuggingFace token when loading model Llama weights from HuggingFace")
 
