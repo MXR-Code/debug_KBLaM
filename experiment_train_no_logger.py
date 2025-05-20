@@ -586,7 +586,7 @@ if __name__ == "__main__":
     if llm_model_specification is None:
         raise ValueError("Either supply model_dir_to_resume or hf_model_spec")
 
-    hf_token='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'
+    hf_token='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'
     if hf_token is None and args.llm_type == "llama3":  # 如果使用Llama3模型且未提供令牌
         raise ValueError( "Please supply HuggingFace token when loading model Llama weights from HuggingFace")
 
@@ -596,14 +596,15 @@ if __name__ == "__main__":
     else:
         hf_token = None
 
-
+    print(f"AutoTokenizer.from_pretrained(pretrained_model_name_or_path={hf_model_specification}")
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=hf_model_specification,
                                               trust_remote_code=True, # 'meta-llama/Llama-3.2-1B-Instruct'
                                               token=hf_token)
-    tokenizer.pad_token = tokenizer.eos_token  # 设置填充标记为结束标记
+    tokenizer.pad_token = tokenizer.eos_token
 
-    if args.llm_type == "llama3":  # 如果选择Llama3
-        model = KblamLlamaForCausalLM.from_pretrained(llm_model_specification,  # 从HuggingFace加载Llama模型
+
+    if args.llm_type == "llama3":
+        model = KblamLlamaForCausalLM.from_pretrained(pretrained_model_name_or_path=llm_model_specification,
                                                       device_map=device,
                                                       torch_dtype=torch.bfloat16,
                                                       trust_remote_code=True,
