@@ -555,7 +555,7 @@ if __name__ == "__main__":
     batch_size = args.B  # 获取批处理大小
 
     total_steps = args.total_step  # 获取总步数
-    encoder_spec = args.encoder_specification  # 获取编码器规格
+    encoder_spec = args.encoder_name  # 获取编码器规格
     key_embd_src = args.key_embed_source  # 获取键嵌入来源
     use_data_aug = args.use_data_augment  # 是否使用数据增强
     use_lr_decay = args.use_learning_rate_decay  # 是否使用学习率衰减
@@ -708,8 +708,8 @@ if __name__ == "__main__":
         kb_config = KBLaMConfig.from_pretrained(
             os.path.join(model_dir_to_resume, "kb_config.json"))  # 加载KB配置
     else:
-        kb_config = KBLaMConfig(sep_query_head=sep_query_head,  # 创建新的KB配置
-                                kb_layer_frequency=kb_token_layer_frequency,
+        kb_config = KBLaMConfig(separate_query_head=sep_query_head,  # 创建新的KB配置
+                                kb_token_layer_frequency=kb_token_layer_frequency,
                                 )
 
     encoder.train()  # 设置编码器为训练模式

@@ -306,10 +306,10 @@ position_ids = torch.arange(q_len).unsqueeze(0).expand(batch_size, q_len)
 attention_mask = torch.ones(batch_size, 1, q_len, q_len)  # 全部注意力
 
 # 创建KBLaMConfig实例
-kb_config = KBLaMConfig(kb_layer_frequency=1,
+kb_config = KBLaMConfig(kb_token_layer_frequency=1,
                         dynamic_sparsify=False,
                         top_k_kb=2,
-                        sep_query_head=False,
+                        separate_query_head=False,
                         kb_scale_factor=None)
 
 # 创建kb_kvs，假设kb_len=2，head_dim=8

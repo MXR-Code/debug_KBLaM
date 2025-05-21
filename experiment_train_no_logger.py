@@ -511,7 +511,7 @@ if __name__ == "__main__":
     num_train_sample = args.num_train_sample  # 获取数据集大小
     batch_size = args.batch_size  # 获取批处理大小
     total_step = args.total_steps  # 获取总步数
-    encoder_specification = args.encoder_specification  # 获取编码器规格
+    encoder_name = args.encoder_name  # 获取编码器规格
     key_embed_source = args.key_embed_source  # 获取键嵌入来源
     use_data_augment = args.use_data_augment  # 是否使用数据增强
     use_learning_rate_decay = args.use_learning_rate_decay  # 是否使用学习率衰减
@@ -556,10 +556,10 @@ if __name__ == "__main__":
 
     if use_cached_embed:  # 如果使用缓存的嵌入
         # 我们从磁盘加载预计算版本，快速化处理
-        key_embds, value_embds = load_cached_embeddings(encoder_specification=encoder_specification,
-                                                        dataset_dir=dataset_dir,
-                                                        dataset_name=dataset_name,
-                                                        key_embed_source=key_embed_source)  # 加载缓存的嵌入
+        key_embeds, value_embeds = load_cached_embeddings(encoder_specification=encoder_name,
+                                                          dataset_dir=dataset_dir,
+                                                          dataset_name=dataset_name,
+                                                          key_embed_source=key_embed_source)  # 加载缓存的嵌入
 
     if use_extended_qa:  # 如果使用扩展QA
         dataset = json.load(open(os.path.join(dataset_dir, f"{dataset_name}_augmented.json")))  # 加载扩展数据集
@@ -586,9 +586,9 @@ if __name__ == "__main__":
     if llm_model_specification is None:
         raise ValueError("Either supply model_dir_to_resume or hf_model_spec")
 
-    hf_token='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'
+    hf_token = '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'
     if hf_token is None and args.llm_type == "llama3":  # 如果使用Llama3模型且未提供令牌
-        raise ValueError( "Please supply HuggingFace token when loading model Llama weights from HuggingFace")
+        raise ValueError("Please supply HuggingFace token when loading model Llama weights from HuggingFace")
 
     # Tokenizer来自基础模型
     if hf_token is not None and args.llm_type == "llama3":
@@ -598,86 +598,76 @@ if __name__ == "__main__":
 
     print(f"AutoTokenizer.from_pretrained(pretrained_model_name_or_path={hf_model_specification}")
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=hf_model_specification,
-                                              trust_remote_code=True, # 'meta-llama/Llama-3.2-1B-Instruct'
+                                              trust_remote_code=True,  # 'meta-llama/Llama-3.2-1B-Instruct'
                                               token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
-
 
     if args.llm_type == "llama3":
         model = KblamLlamaForCausalLM.from_pretrained(pretrained_model_name_or_path=llm_model_specification,
                                                       device_map=device,
                                                       torch_dtype=torch.bfloat16,
                                                       trust_remote_code=True,
-                                                      token=hf_token,
-                                                      )
+                                                      token=hf_token)
     elif args.llm_type == "phi3":  # 如果选择Phi3
-        model = KBLaMPhi3ForCausalLM.from_pretrained(llm_model_specification,  # 从HuggingFace加载Phi3模型
+        model = KBLaMPhi3ForCausalLM.from_pretrained(llm_model_specification,
                                                      device_map=device,
                                                      torch_dtype="auto",
-                                                     trust_remote_code=True,
-                                                     )
+                                                     trust_remote_code=True)
     else:
-        raise ValueError(f"LLM type {args.llm_type} not recognised")  # 抛出错误，未识别的模型类型
+        assert False, f"LLM type {args.llm_type} not recognised"
 
-    model.eval()  # 设置模型为评估模式
-    # 冻结模型
-    for _, param in model.named_parameters():  # 遍历模型参数
-        param.requires_grad = False  # 禁用梯度更新
+    model.eval()
+    for _, param in model.named_parameters(): param.requires_grad = False
 
     # 设置编码器
-    encoder = KBEncoder(encoder_name=encoder_specification,  # 创建知识库编码器
+    out_dim = model.config.hidden_size * (model.config.num_hidden_layers // kb_token_layer_frequency + 1)
+    encoder = KBEncoder(encoder_name=encoder_name,  # 创建知识库编码器
                         projector_type="linear",
                         endpoint_url="",
-                        out_dim=model.config.hidden_size  # 设置输出维度
-                                * (model.config.num_hidden_layers // kb_token_layer_frequency + 1),
-                        # 设置输出维度
+                        out_dim=out_dim,
                         frozen_base_model=True,  # 冻结基础模型
-                        device=device,  # 设置设备
-                        )
+                        device=device)
 
     if model_dir_to_resume:  # 如果提供了恢复目录
         encoder.load_state_dict(torch.load(os.path.join(model_dir_to_resume, "encoder.pt")))  # 加载编码器状态
         kb_config = KBLaMConfig.from_pretrained(os.path.join(model_dir_to_resume, "kb_config.json"))  # 加载KB配置
     else:
-        kb_config = KBLaMConfig(sep_query_head=separate_query_head,  # 创建新的KB配置
-                                kb_layer_frequency=kb_token_layer_frequency,
-                                )
+        kb_config = KBLaMConfig(separate_query_head=separate_query_head,
+                                kb_token_layer_frequency=kb_token_layer_frequency)
 
     encoder.train()  # 设置编码器为训练模式
 
     kbretriever = KBRetriever(encoder=encoder,  # 创建KBRetriever对象
                               dataset=training_set,
-                              key_embds=key_embds,  # 用加载的键嵌入
-                              value_embds=value_embds,  # 用加载的值嵌入
-                              )
+                              key_embds=key_embeds,  # 用加载的键嵌入
+                              value_embds=value_embeds)
+
+    # 创建checkpoint名称
+    prefix_string = get_prefix_str(args=args)  # 获取实验前缀字符串
+    llm_ckpt_name = f"{prefix_string}KeyFrom{key_embed_source}_{encoder_name}_{dataset_name}_{llm_type}"
 
     # 开始训练
-    prefix_string = get_prefix_str(args=args)  # 获取实验前缀字符串
-    llm_ckpt_name = f"{prefix_string}KeyFrom{key_embed_source}_{encoder_specification}_{dataset_name}_{llm_type}"  # 创建checkpoint名称
-
-    trainer = Trainer(model,  # 创建Trainer对象
-                      kbretriever,
-                      tokenizer,
-                      kb_token_layer_frequency,
-                      total_step,
-                      args.lr,
-                      device,
-                      use_learning_rate_decay,
-                      kb_size,  # 传递知识库大小
-                      llm_ckpt_name,
-                      model_save_dir,
+    trainer = Trainer(llm_model=model,  # 创建Trainer对象
+                      kbretriever=kbretriever,
+                      tokenizer=tokenizer,
+                      kb_token_layer_frequency=kb_token_layer_frequency,
+                      num_steps=total_step,
+                      lr=args.lr,
+                      device=device,
+                      use_lr_decay=use_learning_rate_decay,
+                      kb_size=kb_size,  # 传递知识库大小
+                      llm_savename=llm_ckpt_name,
+                      output_dir=model_save_dir,
                       sep_query_head=separate_query_head,
-                      max_seq_len=max_seq_len,
-                      )
+                      max_seq_len=max_seq_len)
 
-    trainer.train(training_set,  # 开始训练过程
-                  batch_size,
-                  gradient_accumulation_step,
-                  outlier_num,
+    trainer.train(training_set=training_set,  # 开始训练过程
+                  batch_size=batch_size,
+                  grad_accum_steps=gradient_accumulation_step,
+                  outlier_num=outlier_num,
                   use_data_aug=use_data_augment,
                   multi_entities=multi_entity,
                   use_extended_qa=use_extended_qa,
                   save_period=3000,  # 设置保存周期
                   resumed_step=resumed_step,  # 设置恢复步数
-                  kb_config=kb_config,  # 设置KB配置
-                  )
+                  kb_config=kb_config)
