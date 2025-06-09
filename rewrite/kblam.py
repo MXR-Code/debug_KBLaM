@@ -24,7 +24,9 @@ class KBLaM(Module):
                  sentence_encoder=None,
                  llm=None,
                  key_adapter=None,
-                 value_adapter=None):
+                 value_adapter=None,
+                 use_extended_question_and_answer=False,
+                 use_data_augmentation=False):
         super().__init__()
         self.llm_type = llm_type
         self.tokenizer = tokenizer
@@ -33,14 +35,15 @@ class KBLaM(Module):
         self.key_adapter = key_adapter
         self.value_adapter = value_adapter
 
+        self.use_extended_question_and_answer = use_extended_question_and_answer
+        self.use_data_augmentation = use_data_augmentation
+
     def forward(self, batch_data, context_data):
         input_index, attention_mask, true_label = self.tokenize(batch_data=batch_data)
         kb_embed = self.retriever(batch_data=batch_data, context_data=context_data)
 
-        out = self.llm.forward(input_ids=input_index,
-                               attention_mask=attention_mask,
-                               kb_kvs=kb_embed,
-                               output_attentions=True)
+        out = self.llm.forward(input_ids=input_index, attention_mask=attention_mask, kb_kvs=kb_embed,
+                               output_attentions=False)
         logits = out["logits"]
 
         return logits
@@ -83,34 +86,42 @@ class KBLaM(Module):
         batch_value_embed = torch.stack(value_embed_list)
 
         if len(batch_key_embed.shape) == 2:
-            # Add comment on why we need this line
-            batch_key_embed = batch_key_embed.unsqueeze(0).transpose(0, 1)
-            batch_value_embed = batch_value_embed.unsqueeze(0).transpose(0, 1)
+            batch_size, embed_dim = batch_key_embed.shape
+            batch_size, embed_dim = batch_value_embed.shape
+            batch_key_embed = batch_key_embed.unsqueeze(1)
+            batch_value_embed = batch_value_embed.unsqueeze(1)
 
         # 2
-        context_set_key_embed_list, context_set_value_embed_list = [], []
+        context_key_embed_list, context_value_embed_list = [], []
         for data in context_data:
             key_text = data["key_string"]
             key_embed = self.sentence_encoder.forward(sentence=key_text)
             key_embed = self.key_adapter(key_embed)
-            context_set_key_embed_list.append(key_embed)
+            context_key_embed_list.append(key_embed)
 
             value_text = data["description"]
             value_embed = self.sentence_encoder.forward(sentence=value_text)
             value_embed = self.value_adapter(value_embed)
-            context_set_value_embed_list.append(value_embed)
+            context_value_embed_list.append(value_embed)
 
-        context_set_key = torch.stack(context_set_key_embed_list)
-        context_set_val = torch.stack(context_set_value_embed_list)
+        context_key_embed = torch.stack(context_key_embed_list)
+        context_value_embed = torch.stack(context_value_embed_list)
 
-        context_set_key = context_set_key.unsqueeze(0).expand(batch_size, *context_set_key.shape)
-        context_set_val = context_set_val.unsqueeze(0).expand(batch_size, *context_set_val.shape)
+        context_size, embed_dim = context_key_embed.shape
+        context_size, embed_dim = context_value_embed.shape
+        context_key_embed = context_key_embed.unsqueeze(0).expand(batch_size, context_size, embed_dim)
+        context_value_embed = context_value_embed.unsqueeze(0).expand(batch_size, context_size, embed_dim)
 
         true_kb_copy = 1
+        batch_key_embed = [batch_key_embed] * true_kb_copy + [context_key_embed]
+        batch_value_embed = [batch_value_embed] * true_kb_copy + [context_value_embed]
+        batch_key_embed = torch.concat(tensors=batch_key_embed, dim=1)
+        batch_value_embed = torch.concat(tensors=batch_value_embed, dim=1)
 
-        key_embedding = torch.concat(tensors=[*([batch_key_embed] * true_kb_copy), context_set_key], dim=1)
-        value_embedding = torch.concat(tensors=[*([batch_value_embed] * true_kb_copy), context_set_val], dim=1)
-        kb_embedding = (key_embedding, value_embedding)
+        batch_size, seq_len, embed_dim = batch_key_embed.shape
+        seq_len = batch_size // batch_size + context_size
+
+        kb_embedding = (batch_key_embed, batch_value_embed)
 
         return kb_embedding
 

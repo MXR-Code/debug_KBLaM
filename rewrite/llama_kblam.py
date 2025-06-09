@@ -110,11 +110,6 @@ class LlamaAttention_KBLaM(nn.Module):
         self.q_proj_new = nn.Linear(in_features=self.hidden_size,
                                     out_features=self.num_heads * self.head_dim,
                                     bias=config.attention_bias)
-        self.kb_layer_frequency = kb_config.kb_layer_frequency
-        self.dynamic_sparsify = kb_config.dynamic_sparsify
-        self.topk_size = kb_config.top_k_kb
-        self.sep_query_head = kb_config.seperate_query_head
-        self.kb_scale_factor = kb_config.kb_scale_factor
 
     def prune_key_value(self, query, kb_keys, kb_values, topk_size=20):
         assert query.requires_grad is False, "This function should only be used at test time"
@@ -162,7 +157,6 @@ class LlamaAttention_KBLaM(nn.Module):
     def attention_forward(self,
                           key_states,
                           value_states,
-                          kb_config,
                           kb_kvs,
                           batch_size,
                           query_states_2,
@@ -171,7 +165,13 @@ class LlamaAttention_KBLaM(nn.Module):
                           query_states,
                           save_attention_weights,
                           attention_save_loc,
-                          attention_file_base_name):
+                          attention_file_base_name,
+                          kb_layer_frequency,
+                          dynamic_sparsify,
+                          topk_size,
+                          seperate_query_head,
+                          kb_scale_factor
+                          ):
         PADDING_VALUE = torch.finfo(torch.bfloat16).min
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -181,16 +181,16 @@ class LlamaAttention_KBLaM(nn.Module):
         attn_weights_2 = None
 
         if kb_kvs is not None:
-            if self.layer_idx % self.kb_layer_frequency == 0:
+            if self.layer_idx % kb_layer_frequency == 0:
                 kb_keys, kb_values = kb_kvs  # (kb_len, head_dim * num_heads * num_adapters)
-                kb_idx = self.layer_idx // self.kb_layer_frequency  # Should be something inside the kb config
+                kb_idx = self.layer_idx // kb_layer_frequency  # Should be something inside the kb config
                 if len(kb_keys.shape) == 2:  # Not batch dim
                     kb_len = kb_keys.shape[0]
 
-                    shape = (kb_len, 1 + self.config.num_hidden_layers // self.kb_layer_frequency, -1)
+                    shape = (kb_len, 1 + self.config.num_hidden_layers // kb_layer_frequency, -1)
                     kb_keys = kb_keys.reshape(shape)[:, kb_idx]
 
-                    shape = (kb_len, 1 + self.config.num_hidden_layers // self.kb_layer_frequency, -1)
+                    shape = (kb_len, 1 + self.config.num_hidden_layers // kb_layer_frequency, -1)
                     kb_values = kb_values.reshape(shape)[:, kb_idx]
 
                     kb_keys = kb_keys.view(kb_len, self.num_heads, self.head_dim).transpose(0, 1)
@@ -199,11 +199,11 @@ class LlamaAttention_KBLaM(nn.Module):
                     kb_keys = kb_keys.unsqueeze(0).expand(batch_size, self.num_heads, kb_len, self.head_dim)
                     kb_values = kb_values.unsqueeze(0).expand(batch_size, self.num_heads, kb_len, self.head_dim)
 
-                    if self.dynamic_sparsify:
+                    if dynamic_sparsify:
                         kb_keys, kb_values, attn_weights_2 = self.prune_key_value(query=query_states_2,
                                                                                   kb_keys=kb_keys,
                                                                                   kb_values=kb_values,
-                                                                                  topk_size=self.topk_size)
+                                                                                  topk_size=topk_size)
                     # Append the KB keys and values in the front, in front of padding
                     key_states = torch.concat([kb_keys, key_states], dim=2)
                     value_states = torch.concat([kb_values, value_states], dim=2)
@@ -211,20 +211,20 @@ class LlamaAttention_KBLaM(nn.Module):
                 elif len(kb_keys.shape) == 3:  # Has a batch dim
                     kb_len = kb_keys.shape[1]
 
-                    shape = (batch_size, kb_len, 1 + self.config.num_hidden_layers // self.kb_layer_frequency, -1)
+                    shape = (batch_size, kb_len, 1 + self.config.num_hidden_layers // kb_layer_frequency, -1)
                     kb_keys = kb_keys.view(shape)[:, :, kb_idx]
 
-                    shape = (batch_size, kb_len, 1 + self.config.num_hidden_layers // self.kb_layer_frequency, -1)
+                    shape = (batch_size, kb_len, 1 + self.config.num_hidden_layers // kb_layer_frequency, -1)
                     kb_values = kb_values.view(shape)[:, :, kb_idx]
 
                     kb_keys = kb_keys.view(batch_size, kb_len, self.num_heads, self.head_dim).transpose(1, 2)
                     kb_values = kb_values.view(batch_size, kb_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-                    if self.dynamic_sparsify:
+                    if dynamic_sparsify:
                         kb_keys, kb_values, attn_weights_2 = self.prune_key_value(query=query_states_2,
                                                                                   kb_keys=kb_keys,
                                                                                   kb_values=kb_values,
-                                                                                  topk_size=self.topk_size)
+                                                                                  topk_size=topk_size)
                     # Append the KB keys and values in the front, in front of padding
                     key_states = torch.concat([kb_keys, key_states], dim=2)
                     value_states = torch.concat([kb_values, value_states], dim=2)
@@ -240,11 +240,9 @@ class LlamaAttention_KBLaM(nn.Module):
         attn_weights = torch.matmul(query_states, key_states.transpose(dim0=2, dim1=3)) / math.sqrt(self.head_dim)
 
         # KBLaM Part
-        sep_query_head = kb_config.seperate_query_head
-        kb_scale_factor = kb_config.kb_scale_factor
-        if sep_query_head:
+        if seperate_query_head:
             if kb_kvs is not None:
-                if self.layer_idx % self.kb_layer_frequency == 0:
+                if self.layer_idx % kb_layer_frequency == 0:
                     # If we have pruned the KB tokens, then this quantity should have been computed,
                     # if not, then we compute it here
                     if attn_weights_2 is None:
@@ -302,7 +300,11 @@ class LlamaAttention_KBLaM(nn.Module):
                 output_attentions: bool = False,
                 use_cache: bool = False,
                 kb_kvs: Optional[tuple] = None,
-                kb_config: Optional[KBLaMConfig] = None,
+                kb_layer_frequency=3,
+                dynamic_sparsify=False,
+                topk_size=100,
+                seperate_query_head=False,
+                kb_scale_factor=None,
                 save_attention_weights: bool = True,
                 attention_save_loc: Optional[str] = None,
                 attention_file_base_name: Optional[str] = None,
@@ -345,11 +347,15 @@ class LlamaAttention_KBLaM(nn.Module):
                                                            attention_mask=attention_mask,
                                                            # KBLaM Use
                                                            query_states_2=query_states_2,
-                                                           kb_config=kb_config,
                                                            kb_kvs=kb_kvs,
                                                            save_attention_weights=save_attention_weights,
                                                            attention_save_loc=attention_save_loc,
-                                                           attention_file_base_name=attention_file_base_name)
+                                                           attention_file_base_name=attention_file_base_name,
+                                                           kb_layer_frequency=kb_layer_frequency,
+                                                           dynamic_sparsify=dynamic_sparsify,
+                                                           topk_size=topk_size,
+                                                           seperate_query_head=seperate_query_head,
+                                                           kb_scale_factor=kb_scale_factor)
 
         attn_output = attn_output.reshape(batch_size, query_seq_len, self.hidden_size)
 

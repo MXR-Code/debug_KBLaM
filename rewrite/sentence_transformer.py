@@ -112,7 +112,7 @@ class SentenceEncoder(Module, FeatureExtractionMixin):
                         "<ENTITY_SEP>": 4,
                         "<KV_SEP>": 5}
 
-    def __init__(self, model_name: str = None, azure_endpoint_url: str = None):
+    def __init__(self, model_name: str = None, azure_endpoint_url: str = None, device=None):
         super().__init__()
         self.model_name = model_name
 
@@ -123,8 +123,8 @@ class SentenceEncoder(Module, FeatureExtractionMixin):
                 self.out_dim = 3072
             if model_name == "ada-embeddings":
                 self.out_dim = 1536
-        elif model_name in ["all-MiniLM-L6-v2", "all-mpnet-base-v2"]:
-            self.model = sentence_transformers.SentenceTransformer(model_name)
+        elif model_name in ["sentence-transformers/all-MiniLM-L6-v2", "sentence-transformers/all-mpnet-base-v2"]:
+            self.model = sentence_transformers.SentenceTransformer(model_name_or_path=model_name, device=device)
             self.out_dim = self.model.get_sentence_embedding_dimension()
         else:
             assert False
@@ -132,7 +132,7 @@ class SentenceEncoder(Module, FeatureExtractionMixin):
     def forward(self, sentence=None):
         if self.model_name in ["text-embedding-3-large", "ada-embeddings"]:
             sentence_embed = self.model.generate_embedding(sentence)
-        elif self.model_name in ["all-MiniLM-L6-v2", "all-mpnet-base-v2"]:
+        elif self.model_name in ["sentence-transformers/all-MiniLM-L6-v2", "sentence-transformers/all-mpnet-base-v2"]:
             sentence_embed = self.model.encode(sentence, convert_to_numpy=False)
 
         return sentence_embed
