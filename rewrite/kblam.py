@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from typing import List
 import random
+from torch.nn.parallel import DistributedDataParallel
 
 
 class KBLaM(Module):
@@ -38,17 +39,115 @@ class KBLaM(Module):
         self.use_extended_question_and_answer = use_extended_question_and_answer
         self.use_data_augmentation = use_data_augmentation
 
-    def forward(self, batch_data, context_data):
-        input_index, attention_mask, true_label = self.tokenize(batch_data=batch_data)
-        kb_embed = self.retriever(batch_data=batch_data, context_data=context_data)
+        self.CrossEntropyLoss = torch.nn.CrossEntropyLoss()
 
-        out = self.llm.forward(input_ids=input_index, attention_mask=attention_mask, kb_kvs=kb_embed,
-                               output_attentions=False)
-        logits = out["logits"]
+    def forward(self, batch_data, context_data, test=False):
+        if self.sentence_encoder.training:
+            self.sentence_encoder.eval()
+            for parameter in self.sentence_encoder.parameters():
+                parameter.requires_grad = False
+        if self.llm.training:
+            self.llm.eval()
+            for parameter in self.llm.parameters():
+                parameter.requires_grad = False
 
-        return logits
+        input_index, attention_mask, true_label = self.tokenization(batch_data=batch_data)
+        knowledge_embed = self.retriever(batch_data=batch_data, context_data=context_data)
 
-    def tokenize(self, batch_data):
+        if test:
+            out_without_kb = self.llm.generate(input_ids=input_index,  # Llama
+                                               attention_mask=attention_mask,
+                                               position_ids=None,
+                                               past_key_values=None,
+                                               inputs_embeds=None,
+                                               labels=None,
+                                               use_cache=None,
+                                               output_attentions=False,
+                                               output_hidden_states=None,
+                                               cache_position=None,
+                                               logits_to_keep=0,
+                                               # generate
+                                               max_new_tokens=40,
+                                               tokenizer=self.tokenizer,
+                                               # KBLaM
+                                               knowledge_embed=None,
+                                               kb_layer_frequency=3)
+
+            out_with_kb = self.llm.generate(input_ids=input_index,  # Llama
+                                            attention_mask=attention_mask,
+                                            position_ids=None,
+                                            past_key_values=None,
+                                            inputs_embeds=None,
+                                            labels=None,
+                                            use_cache=None,
+                                            output_attentions=True,
+                                            output_hidden_states=None,
+                                            cache_position=None,
+                                            logits_to_keep=0,
+                                            # generate
+                                            max_new_tokens=40,
+                                            tokenizer=self.tokenizer,
+                                            # KBLaM
+                                            knowledge_embed=knowledge_embed,
+                                            kb_layer_frequency=3)
+            return out_without_kb, out_with_kb, true_label
+
+
+        else:
+            out = self.llm.forward(input_ids=input_index,  # Llama
+                                   attention_mask=attention_mask,
+                                   position_ids=None,
+                                   past_key_values=None,
+                                   inputs_embeds=None,
+                                   labels=None,
+                                   use_cache=None,
+                                   output_attentions=False,
+                                   output_hidden_states=None,
+                                   cache_position=None,
+                                   logits_to_keep=0,
+                                   # KBLaM
+                                   knowledge_embed=knowledge_embed,
+                                   kb_layer_frequency=3)
+            logits = out["logits"]
+
+            return logits, true_label
+
+    def loss_function(self, logits, true_label):
+        batch_size, seq_len, vocab_size = logits.shape
+        # pred_label = logits.argmax(axis=2)
+        # for batch_index in range(batch_size):
+        #     token_index = pred_label[batch_index]
+        #     pred_text = self.tokenizer.decode(token_index)
+        #     token_index = true_label[batch_index]
+        #     token_index = token_index[token_index >= 0]
+        #     true_text = self.tokenizer.decode(token_index)
+
+        shift_logits = logits[:, :-1, :].contiguous()  # 移位logits以对应标签
+        shift_labels = true_label[:, 1:].contiguous()  # 移位标签
+
+        weights = (shift_labels > 0)
+        weights = weights.sum(-1, keepdim=True)
+        weights = weights.expand(-1, shift_labels.shape[1])
+        weights = weights.contiguous()
+
+        if not isinstance(self.llm, DistributedDataParallel):
+            assert vocab_size == self.llm.config.vocab_size
+        else:
+            assert vocab_size == self.llm.module.config.vocab_size
+
+        shift_logits = shift_logits.view(-1, vocab_size)  # 重塑logits
+        shift_labels = shift_labels.view(-1)  # 重塑标签
+        weights = weights.view(-1)  # 重塑权重
+
+        shift_labels = shift_labels.to(shift_logits.device)
+        loss = self.CrossEntropyLoss(input=shift_logits, target=shift_labels)
+        # loss = (loss * weights.max() / weights).mean()
+        loss = loss * (weights.max() / weights)
+        loss = loss.mean()
+
+        return loss
+
+    def tokenization(self, batch_data):
         with torch.autograd.no_grad():
             batch_format_QA = []
             for data in batch_data:
@@ -69,7 +168,7 @@ class KBLaM(Module):
 
     def retriever(self, batch_data, context_data):
         batch_size = len(batch_data)
-        # 1
+        # 1 knowledge token
         key_embed_list, value_embed_list = [], []
         for data in batch_data:
             key_text = data["key_string"]
@@ -91,7 +190,7 @@ class KBLaM(Module):
             batch_key_embed = batch_key_embed.unsqueeze(1)
             batch_value_embed = batch_value_embed.unsqueeze(1)
 
-        # 2
+        # 2 context token
         context_key_embed_list, context_value_embed_list = [], []
         for data in context_data:
             key_text = data["key_string"]
@@ -185,3 +284,21 @@ class KBLaM(Module):
             answer_mask[b, : (answer_indices[b].item() + 2)] = 0
         labels = input_ids * answer_mask + (1 - answer_mask) * (-100)
         return labels
+
+    def prune_text_llama(self, sentence: str) -> str:
+        # 原始句子
+        sentence = sentence.replace("<|eot_id|>", "")
+        # 替换 header_id 的标记
+        sentence = sentence.replace("<|start_header_id|>assistant<|end_header_id|>", "")
+        sentence = sentence.replace("<|start_header_id|>user<|end_header_id|>", "")
+        # 替换文本结束标记
+        sentence = sentence.replace("<|end_of_text|>", "")
+        return sentence
+
+    def save_attention(self, each_layer_attn_weights, attention_save_dir, attention_save_name):
+        for layer_index in range(len(each_layer_attn_weights)):
+            attn_weights = each_layer_attn_weights[layer_index]
+            # TODO: Make this function injectable
+            save_path = os.path.join(attention_save_dir, f"{attention_save_name}_LayerIndex{self.layer_idx}")
+            save_path = save_path + ".npy"
+            np.save(save_path, attn_weights.to(torch.float32).cpu().detach().numpy())
