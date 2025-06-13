@@ -100,7 +100,7 @@ class LlamaAttention(nn.Module):
                 cache_position: Optional[torch.LongTensor] = None,
                 **kwargs: Unpack[FlashAttentionKwargs],
                 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if self.config._attn_implementation != "kblam":
+        if self.config._attn_implementation == "kblam":
             # 1 hidden shape
             batch_size, query_seq_len, hidden_dim = hidden_states.size()
 
